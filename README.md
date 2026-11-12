@@ -1,6 +1,6 @@
 # Codex subagent roster mod
 
-This repository contains a version-pinned patch for the Codex CLI. It adds a persistent roster of the current conversation's child agents to the chat footer and keeps the existing subagent picker. Apply a patch only to the exact upstream commit named below.
+This repository contains a version-pinned patch for the Codex CLI. It adds a persistent roster of the current conversation's child agents to the chat footer and keeps the existing subagent picker. Main stays pinned first. Child workers are ordered by state (Running, Waiting, Idle, then Closed) before the visible-row cap, with stable order within each state; the selected child remains visible. Apply a patch only to the exact upstream commit named below.
 
 ## Supported source versions
 
@@ -57,7 +57,9 @@ CODEX_REPO_ROOT="$PWD" python3 scripts/build_codex_package.py \
 sha256sum "$HOME/.cache/codex-agent-roster-0.167.2/package/bin/codex"
 ```
 
-The 0.167.2 source port passed ten focused tests across the four filters below: seven roster checks plus the selected/resumed worker, inactive-approval, and primary-attach liveness checks. See [SOURCE-VALIDATION.md](SOURCE-VALIDATION.md). The full TUI suite was not run. A native preview of the built CLI is still needed to confirm the rendered footer. The CLI patch leaves the official app-server package unchanged.
+The 0.167.2 source port passed eleven focused tests across the four filters below: eight roster checks (including active workers ahead of closed-worker overflow) plus the selected/resumed worker, inactive-approval, and primary-attach liveness checks. See [SOURCE-VALIDATION.md](SOURCE-VALIDATION.md). The full TUI suite was not run.
+
+The corrected Linux x86_64 package was built and its native preview passed. The binary SHA-256 is `daddc9304862c6387ba8e61e0d445a1345515b0e1500cd9157196758c13209ad`. A plain `codex resume` without `--remote` showed an active worker within the five visible worker rows at both standard and 55-column by 18-row terminal sizes. The normal launch reused the already-running official managed app-server; the preview sent no prompt or new model turn. The CLI patch leaves the official app-server package unchanged.
 
 ## Custom local install and rollback
 
@@ -67,7 +69,7 @@ The 0.167.2 source port passed ten focused tests across the four filters below: 
 ./install-local.sh /path/to/codex-package
 ```
 
-The installer does not edit PATH. If you put `~/.local/share/codex-subagent-roster/bin` before `~/.local/bin`, route `codex app-server ...` and daemon commands back to the official managed `~/.local/bin/codex`; this package's launcher is intended for the patched CLI frontend. The current launcher target is saved as `bin/codex.previous` on an upgrade. Run `rollback-local.sh` to swap back to that version; both versioned packages remain available.
+The installer does not edit PATH. If you put `~/.local/share/codex-subagent-roster/bin` before `~/.local/bin`, route `codex app-server ...`, daemon commands, and `codex update` back to the official managed `~/.local/bin/codex`; this package's launcher is intended for the patched CLI frontend. The current launcher target is saved as `bin/codex.previous` on an upgrade. Run `rollback-local.sh` to swap back to that version; both versioned packages remain available.
 
 ```bash
 ./rollback-local.sh

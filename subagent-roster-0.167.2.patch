@@ -1,9 +1,9 @@
 diff --git a/codex-rs/tui/src/agent_roster.rs b/codex-rs/tui/src/agent_roster.rs
 new file mode 100644
-index 0000000..422aea0
+index 0000000..c11c18a
 --- /dev/null
 +++ b/codex-rs/tui/src/agent_roster.rs
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,243 @@
 +use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 +use crate::render::renderable::Renderable;
 +use ratatui::buffer::Buffer;
@@ -24,6 +24,15 @@ index 0000000..422aea0
 +}
 +
 +impl AgentRosterStatus {
++    fn priority(self) -> u8 {
++        match self {
++            Self::Running => 0,
++            Self::Waiting => 1,
++            Self::Idle => 2,
++            Self::Closed => 3,
++        }
++    }
++
 +    fn span(self) -> Span<'static> {
 +        match self {
 +            Self::Running => "Running".yellow(),
@@ -47,7 +56,10 @@ index 0000000..422aea0
 +}
 +
 +impl AgentRoster {
-+    pub(crate) fn new(rows: Vec<AgentRosterRow>) -> Self {
++    pub(crate) fn new(mut rows: Vec<AgentRosterRow>) -> Self {
++        if rows.len() > 1 {
++            rows[1..].sort_by_key(|row| row.status.priority());
++        }
 +        Self { rows }
 +    }
 +
@@ -61,10 +73,15 @@ index 0000000..422aea0
 +        } else {
 +            capacity.saturating_sub(1).min(MAX_CHILDREN + 1)
 +        };
-+        let mut lines: Vec<_> = self
-+            .rows
-+            .iter()
-+            .take(visible)
++        let mut visible_rows: Vec<_> = self.rows.iter().take(visible).collect();
++        if visible > 1
++            && let Some(selected_index) = self.rows.iter().position(|row| row.selected)
++            && selected_index >= visible
++        {
++            visible_rows[visible - 1] = &self.rows[selected_index];
++        }
++        let mut lines: Vec<_> = visible_rows
++            .into_iter()
 +            .map(|row| {
 +                let status = row.status.span();
 +                let prefix = if row.selected { "› " } else { "  " };
@@ -151,6 +168,69 @@ index 0000000..422aea0
 +        assert_eq!(lines.last().unwrap().to_string(), "  +4 more");
 +        assert_eq!(roster.lines(80, 3).last().unwrap().to_string(), "  +8 more");
 +        assert_eq!(roster.lines(80, 1)[0].to_string(), "  9 agents");
++    }
++
++    #[test]
++    fn roster_active_workers_precede_closed_overflow_and_selected_stays_visible() {
++        let roster = AgentRoster::new(vec![
++            AgentRosterRow {
++                label: "Main".into(),
++                status: AgentRosterStatus::Running,
++                selected: false,
++            },
++            AgentRosterRow {
++                label: "closed-0".into(),
++                status: AgentRosterStatus::Closed,
++                selected: false,
++            },
++            AgentRosterRow {
++                label: "closed-1".into(),
++                status: AgentRosterStatus::Closed,
++                selected: false,
++            },
++            AgentRosterRow {
++                label: "closed-2".into(),
++                status: AgentRosterStatus::Closed,
++                selected: false,
++            },
++            AgentRosterRow {
++                label: "closed-3".into(),
++                status: AgentRosterStatus::Closed,
++                selected: false,
++            },
++            AgentRosterRow {
++                label: "closed-4".into(),
++                status: AgentRosterStatus::Closed,
++                selected: false,
++            },
++            AgentRosterRow {
++                label: "closed-5".into(),
++                status: AgentRosterStatus::Closed,
++                selected: true,
++            },
++            AgentRosterRow {
++                label: "waiting".into(),
++                status: AgentRosterStatus::Waiting,
++                selected: false,
++            },
++            AgentRosterRow {
++                label: "running".into(),
++                status: AgentRosterStatus::Running,
++                selected: false,
++            },
++        ]);
++
++        assert_eq!(roster.rows[0].label, "Main");
++        assert_eq!(roster.rows[1].label, "running");
++        assert_eq!(roster.rows[2].label, "waiting");
++        assert_eq!(roster.rows[3].label, "closed-0");
++        assert_eq!(roster.rows[4].label, "closed-1");
++        let lines = roster.lines(80, 7);
++        let rendered = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
++        assert!(rendered[1].contains("running"));
++        assert!(rendered[2].contains("waiting"));
++        assert!(rendered.iter().any(|line| line.contains("› closed-5")));
++        assert_eq!(rendered.last().unwrap(), "  +3 more");
 +    }
 +
 +    #[test]
