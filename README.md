@@ -15,12 +15,25 @@ Upstream repository: <https://github.com/openai/codex>
 
 ## Build Codex 0.167.2 on Linux x86_64
 
-The verified target is `x86_64-unknown-linux-musl`, using the upstream `dev-small` profile and `RUST_MIN_STACK=8388608` for focused tests. Rust and Cargo must be available, with the musl Rust target installed. The pinned Codex checkout provides `scripts/build_codex_package.py`; its package builder handles the required helper and resource files.
+The verified target is `x86_64-unknown-linux-musl`, using the upstream `dev-small` profile and `RUST_MIN_STACK=8388608` for focused tests. Rust and Cargo must be available, with the musl Rust target installed. The build uses same-version helper executables from the official 0.167.2 Linux package and compiles the patched CLI entrypoint from source.
 
 ```bash
+set -euo pipefail
 git clone --branch rust-v0.167.2 --depth 1 https://github.com/openai/codex.git codex-0.167.2-agent-view
 cd codex-0.167.2-agent-view
 test "$(git rev-parse HEAD)" = ce21072c90d32c40af7a55b60b2fb35c84a43a6a
+
+release=https://github.com/openai/codex/releases/download/rust-v0.167.2
+helper_dir="$HOME/.cache/codex-agent-roster-0.167.2/upstream-package"
+mkdir -p "$helper_dir/verified"
+curl -fsSL "$release/codex-package_SHA256SUMS" -o "$helper_dir/codex-package_SHA256SUMS"
+curl -fL "$release/codex-package-x86_64-unknown-linux-musl.tar.gz" \
+  -o "$helper_dir/codex-package-x86_64-unknown-linux-musl.tar.gz"
+(
+  cd "$helper_dir"
+  grep '  codex-package-x86_64-unknown-linux-musl.tar.gz$' codex-package_SHA256SUMS | sha256sum -c -
+)
+tar -xzf "$helper_dir/codex-package-x86_64-unknown-linux-musl.tar.gz" -C "$helper_dir/verified"
 git apply --check /path/to/codex-agent-roster-mod/subagent-roster-0.167.2.patch
 git apply /path/to/codex-agent-roster-mod/subagent-roster-0.167.2.patch
 
@@ -35,6 +48,10 @@ CODEX_REPO_ROOT="$PWD" python3 scripts/build_codex_package.py \
   --variant codex \
   --package-version 0.167.2 \
   --cargo-profile dev-small \
+  --code-mode-host-bin "$helper_dir/verified/bin/codex-code-mode-host" \
+  --exec-server-bin "$helper_dir/verified/bin/codex-exec-server" \
+  --bwrap-bin "$helper_dir/verified/codex-resources/bwrap" \
+  --rg-bin "$helper_dir/verified/codex-path/rg" \
   --package-dir "$HOME/.cache/codex-agent-roster-0.167.2/package"
 "$HOME/.cache/codex-agent-roster-0.167.2/package/bin/codex" --version
 sha256sum "$HOME/.cache/codex-agent-roster-0.167.2/package/bin/codex"
