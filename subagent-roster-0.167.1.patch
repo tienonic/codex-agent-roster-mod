@@ -1,0 +1,1241 @@
+diff --git a/codex-rs/tui/src/agent_roster.rs b/codex-rs/tui/src/agent_roster.rs
+new file mode 100644
+index 000000000..422aea07c
+--- /dev/null
++++ b/codex-rs/tui/src/agent_roster.rs
+@@ -0,0 +1,163 @@
++use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
++use crate::render::renderable::Renderable;
++use ratatui::buffer::Buffer;
++use ratatui::layout::Rect;
++use ratatui::style::Stylize;
++use ratatui::text::Line;
++use ratatui::text::Span;
++use ratatui::widgets::Widget;
++
++const MAX_CHILDREN: usize = 5;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum AgentRosterStatus {
++    Running,
++    Waiting,
++    Idle,
++    Closed,
++}
++
++impl AgentRosterStatus {
++    fn span(self) -> Span<'static> {
++        match self {
++            Self::Running => "Running".yellow(),
++            Self::Waiting => "Waiting".yellow(),
++            Self::Idle => "Idle".dim(),
++            Self::Closed => "Closed".dim(),
++        }
++    }
++}
++
++#[derive(Debug, PartialEq, Eq)]
++pub(crate) struct AgentRosterRow {
++    pub(crate) label: String,
++    pub(crate) status: AgentRosterStatus,
++    pub(crate) selected: bool,
++}
++
++#[derive(Debug, Default, PartialEq, Eq)]
++pub(crate) struct AgentRoster {
++    pub(crate) rows: Vec<AgentRosterRow>,
++}
++
++impl AgentRoster {
++    pub(crate) fn new(rows: Vec<AgentRosterRow>) -> Self {
++        Self { rows }
++    }
++
++    fn lines(&self, width: u16, height: u16) -> Vec<Line<'static>> {
++        if self.rows.len() <= 1 || width == 0 || height == 0 {
++            return Vec::new();
++        }
++        let capacity = usize::from(height).min(MAX_CHILDREN + 2);
++        let visible = if self.rows.len() <= capacity && self.rows.len() <= MAX_CHILDREN + 1 {
++            self.rows.len()
++        } else {
++            capacity.saturating_sub(1).min(MAX_CHILDREN + 1)
++        };
++        let mut lines: Vec<_> = self
++            .rows
++            .iter()
++            .take(visible)
++            .map(|row| {
++                let status = row.status.span();
++                let prefix = if row.selected { "› " } else { "  " };
++                let label = truncate_line_with_ellipsis_if_overflow(
++                    Line::from(vec![prefix.into(), row.label.clone().into()]),
++                    usize::from(width).saturating_sub(status.width() + 2),
++                );
++                let mut spans = label.spans;
++                spans.push("  ".into());
++                spans.push(status);
++                truncate_line_with_ellipsis_if_overflow(Line::from(spans), usize::from(width))
++            })
++            .collect();
++        if visible < self.rows.len() {
++            let hidden = self.rows.len() - visible.max(1);
++            let text = if visible == 0 {
++                let noun = if hidden == 1 { "agent" } else { "agents" };
++                format!("  {hidden} {noun}")
++            } else {
++                format!("  +{hidden} more")
++            };
++            lines.push(truncate_line_with_ellipsis_if_overflow(
++                Line::from(text.dim()),
++                usize::from(width),
++            ));
++        }
++        lines
++    }
++}
++
++impl Renderable for AgentRoster {
++    fn desired_height(&self, width: u16) -> u16 {
++        if self.rows.len() <= 1 || width == 0 {
++            0
++        } else {
++            self.rows.len().min(MAX_CHILDREN + 2) as u16
++        }
++    }
++
++    fn render(&self, area: Rect, buf: &mut Buffer) {
++        for (line, y) in self
++            .lines(area.width, area.height)
++            .into_iter()
++            .zip(area.y..area.bottom())
++        {
++            Widget::render(line, Rect::new(area.x, y, area.width, 1), buf);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::line_truncation::line_width;
++
++    fn roster(children: usize) -> AgentRoster {
++        AgentRoster::new(
++            (0..=children)
++                .map(|i| AgentRosterRow {
++                    label: if i == 0 {
++                        "Main".into()
++                    } else {
++                        format!("分析 👩‍💻 e\u{301} {i}")
++                    },
++                    selected: i == 0,
++                    status: AgentRosterStatus::Running,
++                })
++                .collect(),
++        )
++    }
++
++    #[test]
++    fn roster_hides_without_children_and_bounds_overflow() {
++        assert_eq!(roster(0).desired_height(80), 0);
++        assert_eq!(roster(1).lines(80, 1)[0].to_string(), "  1 agent");
++        assert_eq!(
++            roster(6).lines(80, 7).last().unwrap().to_string(),
++            "  +1 more"
++        );
++        let roster = roster(9);
++        assert_eq!(roster.desired_height(80), 7);
++        let lines = roster.lines(80, 7);
++        assert_eq!(lines.len(), 7);
++        assert_eq!(lines.last().unwrap().to_string(), "  +4 more");
++        assert_eq!(roster.lines(80, 3).last().unwrap().to_string(), "  +8 more");
++        assert_eq!(roster.lines(80, 1)[0].to_string(), "  9 agents");
++    }
++
++    #[test]
++    fn roster_clips_unicode_without_wrapping() {
++        for width in 0..30 {
++            let lines = roster(2).lines(width, 7);
++            assert!(
++                lines
++                    .iter()
++                    .all(|line| line_width(line) <= usize::from(width))
++            );
++            let area = Rect::new(0, 0, width, 3);
++            roster(2).render(area, &mut Buffer::empty(area));
++        }
++    }
++}
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index 80459f411..7c5e83bdc 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -1363,7 +1363,10 @@ impl App {
+         width: u16,
+         render: impl FnOnce(u16, &dyn Renderable) -> T,
+     ) -> T {
+-        let chat_widget = self.chat_widget.as_renderable();
++        let roster = self
++            .agent_navigation
++            .roster(self.primary_thread_id, self.current_displayed_thread_id());
++        let chat_widget = self.chat_widget.as_renderable_with_roster(Some(&roster));
+         render(chat_widget.desired_height(width), &chat_widget)
+     }
+ }
+diff --git a/codex-rs/tui/src/app/agent_navigation.rs b/codex-rs/tui/src/app/agent_navigation.rs
+index 5ea219f8a..5f53a8733 100644
+--- a/codex-rs/tui/src/app/agent_navigation.rs
++++ b/codex-rs/tui/src/app/agent_navigation.rs
+@@ -1,12 +1,12 @@
+-//! Multi-agent picker navigation and labeling state for the TUI app.
++//! Multi-agent navigation, labeling, and roster state for the TUI app.
+ //!
+ //! This module exists to keep the pure parts of multi-agent navigation out of [`crate::app::App`].
+ //! It owns the stable spawn-order cache used by the `/subagents` picker, keyboard next/previous
+-//! navigation, and the contextual footer label for the thread currently being watched.
++//! navigation, the persistent roster, and the contextual footer label for the watched thread.
+ //!
+ //! Responsibilities here are intentionally narrow:
+ //! - remember picker entries and their first-seen order
+-//! - remember which V2 child threads are owned by their parent agent
++//! - remember proven parent links, task labels, and parent-owned V2 threads
+ //! - answer traversal questions like "what is the next thread?"
+ //! - derive user-facing picker/footer text from cached thread metadata
+ //!
+@@ -43,6 +43,8 @@ use uuid::Uuid;
+ pub(crate) struct AgentNavigationState {
+     /// Latest picker metadata for each tracked thread id.
+     threads: HashMap<ThreadId, AgentPickerThreadEntry>,
++    parents: HashMap<ThreadId, ThreadId>,
++    titles: HashMap<ThreadId, String>,
+     /// First-seen order for keyboard cycling. The picker groups waiting threads first.
+     order: Vec<ThreadId>,
+     /// Threads with observed terminal liveness that must not be revived by delayed activity.
+@@ -52,6 +54,8 @@ pub(crate) struct AgentNavigationState {
+     picker_excluded_threads: HashSet<ThreadId>,
+     /// Inactive threads with an approval outstanding in their event store.
+     pub(super) pending_approvals: HashSet<ThreadId>,
++    pub(super) pending_interactions: HashSet<ThreadId>,
++    server_waiting_threads: HashSet<ThreadId>,
+     /// Thread IDs in the currently rendered picker, so a refresh can restore its cursor by ID.
+     pub(super) picker_row_ids: Vec<ThreadId>,
+     /// Coalesces root refreshes while rejecting replies from a previous session.
+@@ -82,6 +86,141 @@ pub(super) struct AgentPickerRefreshState {
+ }
+ 
+ impl AgentNavigationState {
++    pub(crate) fn record_parent(&mut self, child: ThreadId, parent: ThreadId) {
++        if child != parent {
++            self.parents.entry(child).or_insert(parent);
++        }
++    }
++
++    pub(crate) fn record_title(&mut self, thread_id: ThreadId, title: Option<&str>) {
++        if let Some(title) = title
++            .and_then(|s| s.lines().next())
++            .map(str::trim)
++            .filter(|s| !s.is_empty())
++        {
++            self.titles
++                .insert(thread_id, title.chars().take(160).collect());
++        }
++    }
++
++    pub(crate) fn record_spawn_prompt(&mut self, thread_id: ThreadId, prompt: Option<&str>) {
++        if !self.titles.contains_key(&thread_id) {
++            self.record_title(thread_id, prompt);
++        }
++    }
++
++    pub(crate) fn record_thread_status(
++        &mut self,
++        thread_id: ThreadId,
++        status: &codex_app_server_protocol::ThreadStatus,
++    ) {
++        let waiting = matches!(status, codex_app_server_protocol::ThreadStatus::Active { active_flags }
++            if active_flags.iter().any(|flag| matches!(flag,
++                codex_app_server_protocol::ThreadActiveFlag::WaitingOnApproval |
++                codex_app_server_protocol::ThreadActiveFlag::WaitingOnUserInput)));
++        if waiting && !self.stopped_threads.contains(&thread_id) {
++            self.server_waiting_threads.insert(thread_id);
++        } else {
++            self.server_waiting_threads.remove(&thread_id);
++        }
++    }
++
++    pub(crate) fn record_thread_metadata(&mut self, thread: &codex_app_server_protocol::Thread) {
++        let Ok(id) = ThreadId::from_string(&thread.id) else {
++            return;
++        };
++        let parent = thread
++            .parent_thread_id
++            .as_deref()
++            .and_then(|id| ThreadId::from_string(id).ok())
++            .or_else(|| match &thread.source {
++                codex_app_server_protocol::SessionSource::SubAgent(
++                    codex_protocol::protocol::SubAgentSource::ThreadSpawn {
++                        parent_thread_id, ..
++                    },
++                ) => Some(*parent_thread_id),
++                _ => None,
++            });
++        if let Some(parent) = parent {
++            self.parents.insert(id, parent);
++        }
++        self.record_title(id, thread.name.as_deref());
++        self.record_thread_status(id, &thread.status);
++    }
++
++    pub(crate) fn roster(
++        &self,
++        primary: Option<ThreadId>,
++        displayed: Option<ThreadId>,
++    ) -> crate::agent_roster::AgentRoster {
++        let Some(primary) = primary else {
++            return Default::default();
++        };
++        let is_descendant = |id: ThreadId| {
++            let mut current = id;
++            let mut visited = HashSet::new();
++            while visited.insert(current) {
++                let Some(parent) = self.parents.get(&current) else {
++                    return false;
++                };
++                if *parent == primary {
++                    return true;
++                }
++                current = *parent;
++            }
++            false
++        };
++        let descendants: Vec<_> = self
++            .visible_threads()
++            .into_iter()
++            .filter(|(id, _)| *id != primary && is_descendant(*id))
++            .collect();
++        if descendants.is_empty() {
++            return Default::default();
++        }
++        let row = |id, label| {
++            let entry = self.get(&id);
++            crate::agent_roster::AgentRosterRow {
++                label,
++                selected: displayed == Some(id),
++                status: if entry.is_some_and(|e| e.is_closed) {
++                    crate::agent_roster::AgentRosterStatus::Closed
++                } else if self.pending_interactions.contains(&id)
++                    || self.server_waiting_threads.contains(&id)
++                {
++                    crate::agent_roster::AgentRosterStatus::Waiting
++                } else if entry.is_some_and(|e| e.is_running) {
++                    crate::agent_roster::AgentRosterStatus::Running
++                } else {
++                    crate::agent_roster::AgentRosterStatus::Idle
++                },
++            }
++        };
++        let mut rows = vec![row(primary, "Main".to_string())];
++        rows.extend(descendants.into_iter().map(|(id, entry)| {
++            let label = entry
++                .agent_path
++                .as_deref()
++                .and_then(|path| path.rsplit('/').find(|s| !s.trim().is_empty()))
++                .map(|slug| slug.replace('_', " "))
++                .or_else(|| self.titles.get(&id).cloned())
++                .unwrap_or_else(|| {
++                    let label = format_agent_picker_item_name(
++                        entry.agent_nickname.as_deref(),
++                        entry.agent_role.as_deref(),
++                        false,
++                    );
++                    if label == "Agent" {
++                        format!("Agent {}", &id.to_string()[28..])
++                    } else {
++                        label
++                    }
++                });
++            row(id, label)
++        }));
++        crate::agent_roster::AgentRoster::new(rows)
++    }
++
+     pub(crate) fn begin_picker_refresh(&mut self, thread_id: ThreadId) -> Option<Uuid> {
+         if self
+             .picker_refresh
+@@ -210,6 +349,7 @@ impl AgentNavigationState {
+         } else {
+             entry.is_running = false;
+             self.stopped_threads.insert(activity.thread_id);
++            self.server_waiting_threads.remove(&activity.thread_id);
+         }
+     }
+ 
+@@ -227,6 +367,7 @@ impl AgentNavigationState {
+ 
+     pub(crate) fn mark_stopped(&mut self, thread_id: ThreadId) {
+         self.stopped_threads.insert(thread_id);
++        self.server_waiting_threads.remove(&thread_id);
+         self.set_running(thread_id, /*is_running*/ false);
+     }
+ 
+@@ -251,6 +392,7 @@ impl AgentNavigationState {
+     /// this up" by deleting the entry instead, wraparound navigation will silently change shape
+     /// mid-session.
+     pub(crate) fn mark_closed(&mut self, thread_id: ThreadId) {
++        self.server_waiting_threads.remove(&thread_id);
+         if let Some(entry) = self.threads.get_mut(&thread_id) {
+             entry.is_closed = true;
+             entry.is_running = false;
+@@ -268,11 +410,15 @@ impl AgentNavigationState {
+     /// to a pristine single-session state.
+     pub(crate) fn clear(&mut self) {
+         self.threads.clear();
++        self.parents.clear();
++        self.titles.clear();
+         self.order.clear();
+         self.stopped_threads.clear();
+         self.parent_owned_threads.clear();
+         self.picker_excluded_threads.clear();
+         self.pending_approvals.clear();
++        self.pending_interactions.clear();
++        self.server_waiting_threads.clear();
+         self.picker_row_ids.clear();
+         self.picker_refresh = None;
+     }
+@@ -284,6 +430,10 @@ impl AgentNavigationState {
+     /// would leave ghost rows in `/subagents`.
+     pub(crate) fn remove(&mut self, thread_id: ThreadId) {
+         self.threads.remove(&thread_id);
++        self.parents.remove(&thread_id);
++        self.titles.remove(&thread_id);
++        self.pending_interactions.remove(&thread_id);
++        self.server_waiting_threads.remove(&thread_id);
+         self.order.retain(|candidate| *candidate != thread_id);
+         self.stopped_threads.remove(&thread_id);
+         self.parent_owned_threads.remove(&thread_id);
+@@ -508,6 +658,122 @@ mod tests {
+         (state, main_thread_id, first_agent_id, second_agent_id)
+     }
+ 
++    #[test]
++    fn roster_only_includes_proven_descendants_in_spawn_order() {
++        let (mut state, main, first, second) = populated_state();
++        state.set_agent_path(first, Some("/root/inspect_layout".into()));
++        assert!(state.roster(Some(main), Some(main)).rows.is_empty());
++        state.record_parent(first, main);
++        state.record_parent(second, first);
++        state.record_title(second, Some("Inspect behavior\nprivate second line"));
++        let unrelated = ThreadId::new();
++        state.upsert(unrelated, None, None, false);
++        state.set_agent_path(unrelated, Some("/root/unrelated".into()));
++        let roster = state.roster(Some(main), Some(second));
++        assert_eq!(
++            roster
++                .rows
++                .iter()
++                .map(|r| r.label.as_str())
++                .collect::<Vec<_>>(),
++            vec!["Main", "inspect layout", "Inspect behavior"]
++        );
++        assert!(roster.rows[2].selected);
++        assert_eq!(
++            state.get(&first).unwrap().agent_path.as_deref(),
++            Some("/root/inspect_layout")
++        );
++        state.upsert(first, Some("New name".into()), None, false);
++        assert_eq!(
++            state.roster(Some(main), None).rows[1].label,
++            "inspect layout"
++        );
++        state.record_parent(main, second);
++        assert_eq!(state.roster(Some(unrelated), None).rows.len(), 0);
++    }
++
++    #[test]
++    fn roster_uses_explicit_status_and_rejects_delayed_running_activity() {
++        use crate::agent_roster::AgentRosterStatus;
++        let (mut state, main, first, second) = populated_state();
++        state.record_parent(first, main);
++        state.record_parent(second, main);
++        state.mark_running(main);
++        state.mark_running(first);
++        state.pending_interactions.insert(first);
++        state.mark_closed(second);
++        let roster = state.roster(Some(main), Some(main));
++        assert_eq!(roster.rows[0].status, AgentRosterStatus::Running);
++        assert_eq!(roster.rows[1].status, AgentRosterStatus::Waiting);
++        assert_eq!(roster.rows[2].status, AgentRosterStatus::Closed);
++        state.pending_interactions.remove(&first);
++        state.mark_stopped(first);
++        for id in [first, second] {
++            state.record_sub_agent_activity(SubAgentActivityDisplay {
++                thread_id: id,
++                agent_path: "/root/worker".into(),
++                is_running_hint: true,
++            });
++        }
++        let roster = state.roster(Some(main), None);
++        assert_eq!(roster.rows[1].status, AgentRosterStatus::Idle);
++        assert_eq!(roster.rows[2].status, AgentRosterStatus::Closed);
++        state.record_spawn_prompt(first, Some("Original task\nMore details"));
++        state.record_title(first, Some("Actual title"));
++        state.record_spawn_prompt(first, Some("Delayed task"));
++        state.set_agent_path(first, None);
++        assert_eq!(state.titles.get(&first).unwrap(), "Actual title");
++        state.clear();
++        assert!(state.roster(Some(main), None).rows.is_empty());
++    }
++
++    #[test]
++    fn roster_waiting_flags_do_not_depend_on_displayed_thread() {
++        use crate::agent_roster::AgentRosterStatus;
++        use codex_app_server_protocol::ThreadActiveFlag;
++        use codex_app_server_protocol::ThreadStatus;
++        let (mut state, main, first, _) = populated_state();
++        state.record_parent(first, main);
++        state.mark_running(main);
++        state.mark_running(first);
++        for flag in [
++            ThreadActiveFlag::WaitingOnApproval,
++            ThreadActiveFlag::WaitingOnUserInput,
++        ] {
++            let waiting = ThreadStatus::Active {
++                active_flags: vec![flag],
++            };
++            state.record_thread_status(main, &waiting);
++            state.record_thread_status(first, &waiting);
++            for selected in [main, first] {
++                let roster = state.roster(Some(main), Some(selected));
++                assert_eq!(roster.rows[0].status, AgentRosterStatus::Waiting);
++                assert_eq!(roster.rows[1].status, AgentRosterStatus::Waiting);
++            }
++        }
++        state.record_thread_status(
++            main,
++            &ThreadStatus::Active {
++                active_flags: vec![],
++            },
++        );
++        assert_eq!(
++            state.roster(Some(main), None).rows[0].status,
++            AgentRosterStatus::Running
++        );
++        state.mark_stopped(first);
++        state.record_thread_status(
++            first,
++            &ThreadStatus::Active {
++                active_flags: vec![ThreadActiveFlag::WaitingOnApproval],
++            },
++        );
++        assert_eq!(
++            state.roster(Some(main), None).rows[1].status,
++            AgentRosterStatus::Idle
++        );
++    }
++
+     #[test]
+     fn upsert_preserves_first_seen_order() {
+         let (mut state, main_thread_id, first_agent_id, second_agent_id) = populated_state();
+diff --git a/codex-rs/tui/src/app/agent_picker.rs b/codex-rs/tui/src/app/agent_picker.rs
+index 55584ae17..0c0a15216 100644
+--- a/codex-rs/tui/src/app/agent_picker.rs
++++ b/codex-rs/tui/src/app/agent_picker.rs
+@@ -129,6 +129,9 @@ impl App {
+                 return;
+             }
+         };
++        let previous_roster = self
++            .agent_navigation
++            .roster(self.primary_thread_id, self.current_displayed_thread_id());
+         for thread in refresh.threads {
+             let Ok(thread_id) = ThreadId::from_string(&thread.id) else {
+                 continue;
+@@ -143,6 +146,7 @@ impl App {
+                 .thread_event_channels
+                 .get(&thread_id)
+                 .is_some_and(|channel| channel.attachment() == ThreadEventAttachment::Live);
++            self.agent_navigation.record_thread_metadata(&thread);
+             let previous = self.agent_navigation.get(&thread_id);
+             let is_running = matches!(thread.status, ThreadStatus::Active { .. });
+             let update_liveness = previous.is_none() || !is_running;
+@@ -177,6 +181,13 @@ impl App {
+         self.agent_navigation.prune_untracked_picker_exclusions();
+ 
+         self.refresh_agent_picker();
++        if previous_roster
++            != self
++                .agent_navigation
++                .roster(self.primary_thread_id, self.current_displayed_thread_id())
++        {
++            self.chat_widget.request_redraw();
++        }
+         if completion.follow_up_requested {
+             self.refresh_agent_picker_threads(app_server, root);
+         }
+diff --git a/codex-rs/tui/src/app/agents_overview.rs b/codex-rs/tui/src/app/agents_overview.rs
+index 8559f1272..75796f203 100644
+--- a/codex-rs/tui/src/app/agents_overview.rs
++++ b/codex-rs/tui/src/app/agents_overview.rs
+@@ -830,6 +830,9 @@ impl App {
+             {
+                 self.backfill_loaded_subagent_threads(app_server).await;
+             }
++            if !is_new_session {
++                self.refresh_agent_picker_threads(app_server, root_thread_id);
++            }
+             for thread_id in previous_thread_ids {
+                 if previous_running_thread_ids.is_empty()
+                     && thread_id != root_thread_id
+diff --git a/codex-rs/tui/src/app/owned_transcript.rs b/codex-rs/tui/src/app/owned_transcript.rs
+index da20829fa..3778c874f 100644
+--- a/codex-rs/tui/src/app/owned_transcript.rs
++++ b/codex-rs/tui/src/app/owned_transcript.rs
+@@ -309,6 +309,9 @@ impl App {
+             && !self.chat_widget.is_external_writer_view())
+         .then(crate::bottom_pane::ComposerGap::default);
+         let prompt_footer = self.prompt_navigation_footer(area.width.saturating_sub(/*rhs*/ 2));
++        let roster = self
++            .agent_navigation
++            .roster(self.primary_thread_id, self.current_displayed_thread_id());
+         let chat_widget = &self.chat_widget;
+         let view = &mut self.transcript_view;
+         let active_key = chat_widget.active_cell_transcript_key();
+@@ -323,6 +326,7 @@ impl App {
+             .min(area.height);
+         let options = |interacting| ComposerRenderOptions {
+             max_height: Some(max_composer_height),
++            agent_roster: Some(&roster),
+             overlay_top: area.top(),
+             command_popup_placement: if interacting {
+                 CommandPopupPlacement::Hidden
+diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
+index 9203adf62..fd52ffa5d 100644
+--- a/codex-rs/tui/src/app/session_lifecycle.rs
++++ b/codex-rs/tui/src/app/session_lifecycle.rs
+@@ -1163,6 +1163,18 @@ impl App {
+         }
+     }
+ 
++    pub(super) async fn attach_existing_primary_thread_session(
++        &mut self,
++        app_server: &AppServerSession,
++        session: ThreadSessionState,
++        turns: Vec<Turn>,
++    ) -> Result<()> {
++        let root = session.thread_id;
++        self.enqueue_primary_thread_session(session, turns).await?;
++        self.refresh_agent_picker_threads(app_server, root);
++        Ok(())
++    }
++
+     pub(super) async fn replace_chat_widget_with_app_server_thread(
+         &mut self,
+         tui: &mut tui::Tui,
+@@ -1281,7 +1293,10 @@ impl App {
+                 .thread_read(thread_id, /*include_turns*/ false)
+                 .await
+             {
+-                Ok(thread) => threads.push(thread),
++                Ok(thread) => {
++                    self.agent_navigation.record_thread_metadata(&thread);
++                    threads.push(thread);
++                }
+                 Err(err) => {
+                     had_read_error = true;
+                     tracing::warn!(thread_id = %thread_id, %err, "failed to read loaded thread");
+@@ -1482,6 +1497,7 @@ impl App {
+                         .add_info_message(notice.to_string(), /*hint*/ None);
+                 }
+                 self.backfill_loaded_subagent_threads(app_server).await;
++                self.refresh_agent_picker_threads(app_server, resumed_thread_id);
+                 if matches!(
+                     self.runtime_approval_policy_override,
+                     Some(RuntimeApprovalPolicyOverride::Restored(_))
+diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
+index fca1ef21b..f33230ec8 100644
+--- a/codex-rs/tui/src/app/startup.rs
++++ b/codex-rs/tui/src/app/startup.rs
+@@ -1136,7 +1136,11 @@ See the Codex keymap documentation for supported actions and examples."
+             match startup_draft
+                 .run_until(
+                     tui,
+-                    app.enqueue_primary_thread_session(started.session, started.turns),
++                    app.attach_existing_primary_thread_session(
++                        &app_server,
++                        started.session,
++                        started.turns,
++                    ),
+                 )
+                 .await
+             {
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index f8d8f9a90..b26766ea3 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -2930,8 +2930,26 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
+             crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+         ))
+         .await?;
+-        app.enqueue_primary_thread_session(root.session, root.turns)
++        for child in &child_thread_ids {
++            assert!(matches!(app_server.thread_read(*child, false).await?.status,
++                codex_app_server_protocol::ThreadStatus::NotLoaded));
++        }
++        app.attach_existing_primary_thread_session(&app_server, root.session, root.turns)
+             .await?;
++        let loaded = tokio::time::timeout(Duration::from_secs(5), async {
++            loop {
++                if let Some(AppEvent::AgentPickerThreadsLoaded { primary_thread_id, request_id, result }) = app_event_rx.recv().await {
++                    break (primary_thread_id, request_id, result);
++                }
++            }
++        }).await?;
++        assert_eq!(loaded.0, root_thread_id);
++        assert!(loaded.2.is_ok());
++        app.apply_agent_picker_thread_refresh(&app_server, loaded.0, loaded.1, loaded.2);
++        let roster = app.agent_navigation.roster(Some(root_thread_id), Some(root_thread_id));
++        assert_eq!(roster.rows.len(), 3);
++        assert_eq!(roster.rows[0].status, crate::agent_roster::AgentRosterStatus::Idle);
++        assert!(roster.rows.iter().skip(1).all(|row| row.status == crate::agent_roster::AgentRosterStatus::Closed));
+         let mut tui = crate::tui::test_support::make_test_tui()?;
+         for (index, (child_thread_id, multi_agent_version)) in child_thread_ids
+             .iter()
+@@ -3009,6 +3027,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
+         app.select_agent_thread(&mut tui, &mut app_server, root_thread_id)
+             .await?;
+ 
++        app.agent_navigation.clear();
+         app.agent_navigation
+             .record_sub_agent_activity(SubAgentActivityDisplay {
+                 thread_id: child_thread_ids[0],
+@@ -3018,6 +3037,10 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
+         app.thread_event_channels.remove(&child_thread_ids[1]);
+         let backfill = app.backfill_loaded_subagent_threads(&mut app_server).await;
+         assert!(backfill.completed);
++        let roster = app.agent_navigation.roster(Some(root_thread_id), Some(root_thread_id));
++        assert_eq!(roster.rows.len(), 3);
++        assert_eq!(roster.rows[1].label, "child-0");
++        assert_eq!(roster.rows[2].label, "child-1 [worker]");
+         assert_eq!(
+             backfill.refreshed_thread_ids,
+             [child_thread_ids[1]].into_iter().collect()
+@@ -3089,6 +3112,30 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
+             !std::iter::from_fn(|| app_event_rx.try_recv().ok())
+                 .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
+         );
++        let resumed = Box::pin(app_server.resume_thread(
++            &app.local_settings, app.config.clone(), root_thread_id, app.resume_model_settings(),
++        )).await?;
++        let prepared = super::resume_preparation::PreparedResume {
++            backend_id: app_server.backend_id(),
++            config: app.config.clone(),
++            local_settings: app.local_settings.clone(),
++            thread: resumed,
++            read_only: false,
++            history_notice: None,
++            provider_error: None,
++        };
++        app.activate_prepared_session(&mut tui, &mut app_server, prepared).await?;
++        let loaded = tokio::time::timeout(Duration::from_secs(5), async {
++            loop {
++                if let Some(AppEvent::AgentPickerThreadsLoaded { primary_thread_id, request_id, result }) = app_event_rx.recv().await {
++                    break (primary_thread_id, request_id, result);
++                }
++            }
++        }).await?;
++        assert_eq!(loaded.0, root_thread_id);
++        assert!(loaded.2.is_ok());
++        app.apply_agent_picker_thread_refresh(&app_server, loaded.0, loaded.1, loaded.2);
++        assert_eq!(app.agent_navigation.roster(Some(root_thread_id), Some(root_thread_id)).rows.len(), 3);
+         Ok(())
+     }))
+ }
+@@ -4215,15 +4262,51 @@ async fn refresh_pending_thread_approvals_only_lists_inactive_threads() {
+         /*is_closed*/ false,
+     );
+ 
++    app.agent_navigation
++        .record_parent(agent_thread_id, main_thread_id);
++    app.agent_navigation.mark_running(agent_thread_id);
+     app.refresh_pending_thread_approvals().await;
+     assert_eq!(
+         app.chat_widget.pending_thread_approvals(),
+         &["Robie [explorer]".to_string()]
+     );
++    assert_eq!(
++        app.agent_navigation
++            .roster(Some(main_thread_id), Some(main_thread_id))
++            .rows[1]
++            .status,
++        crate::agent_roster::AgentRosterStatus::Waiting
++    );
+ 
+     app.active_thread_id = Some(agent_thread_id);
+     app.refresh_pending_thread_approvals().await;
+     assert!(app.chat_widget.pending_thread_approvals().is_empty());
++    assert_eq!(
++        app.agent_navigation
++            .roster(Some(main_thread_id), Some(agent_thread_id))
++            .rows[1]
++            .status,
++        crate::agent_roster::AgentRosterStatus::Waiting
++    );
++    app.thread_event_channels[&main_thread_id]
++        .store
++        .lock()
++        .await
++        .push_request(exec_approval_request(
++            main_thread_id,
++            "turn-main",
++            "call-main",
++            None,
++        ));
++    app.active_thread_id = Some(main_thread_id);
++    app.refresh_pending_thread_approvals().await;
++    assert_eq!(
++        app.agent_navigation
++            .roster(Some(main_thread_id), Some(main_thread_id))
++            .rows[0]
++            .status,
++        crate::agent_roster::AgentRosterStatus::Waiting
++    );
+ }
+ 
+ #[tokio::test]
+@@ -10485,3 +10568,125 @@ mod navigation_reconnect;
+ 
+ #[path = "tests/backend_event_tests.rs"]
+ mod backend_event_tests;
++
++#[tokio::test]
++async fn background_agent_roster_changes_request_a_frame() -> Result<()> {
++    let mut app = make_test_app().await;
++    let mut tui = crate::tui::test_support::make_test_tui()?;
++    let (draw_tx, mut draws) = tokio::sync::broadcast::channel(16);
++    let mut init =
++        app.chatwidget_init_for_forked_or_resumed_thread(&mut tui, app.config.clone(), None);
++    init.frame_requester = crate::tui::FrameRequester::new(draw_tx);
++    app.replace_chat_widget(ChatWidget::new_with_app_event(init));
++    let main = ThreadId::new();
++    let child = ThreadId::new();
++    app.primary_thread_id = Some(main);
++    app.active_thread_id = Some(main);
++    app.agent_navigation.upsert(main, None, None, false);
++    app.agent_navigation.upsert(child, None, None, false);
++    app.agent_navigation.record_parent(child, main);
++    while tokio::time::timeout(Duration::from_millis(30), draws.recv())
++        .await
++        .is_ok()
++    {}
++
++    app.enqueue_thread_notification(child, turn_started_notification(child, "worker-turn"))
++        .await?;
++    tokio::time::timeout(Duration::from_secs(1), draws.recv()).await??;
++    assert_eq!(
++        app.agent_navigation.roster(Some(main), Some(main)).rows[1].status,
++        crate::agent_roster::AgentRosterStatus::Running
++    );
++    app.enqueue_thread_notification(
++        child,
++        ServerNotification::ThreadNameUpdated(
++            codex_app_server_protocol::ThreadNameUpdatedNotification {
++                thread_id: child.to_string(),
++                thread_name: Some("Inspect roster".into()),
++            },
++        ),
++    )
++    .await?;
++    tokio::time::timeout(Duration::from_secs(1), draws.recv()).await??;
++    assert_eq!(
++        app.agent_navigation.roster(Some(main), Some(main)).rows[1].label,
++        "Inspect roster"
++    );
++    app.enqueue_thread_notification(
++        child,
++        turn_completed_notification(child, "worker-turn", TurnStatus::Completed),
++    )
++    .await?;
++    tokio::time::timeout(Duration::from_secs(1), draws.recv()).await??;
++    assert_eq!(
++        app.agent_navigation.roster(Some(main), Some(main)).rows[1].status,
++        crate::agent_roster::AgentRosterStatus::Idle
++    );
++    let app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
++    let unloaded = ThreadId::new();
++    let request_id = app
++        .agent_navigation
++        .begin_picker_refresh(main)
++        .expect("refresh starts");
++    app.apply_agent_picker_thread_refresh(
++        &app_server,
++        main,
++        request_id,
++        Ok(crate::app_event::AgentPickerThreadRefresh {
++            threads: vec![super::agents_overview::tests::overview_thread(
++                unloaded,
++                Some(main),
++                "Saved worker",
++                codex_app_server_protocol::ThreadStatus::NotLoaded,
++            )],
++            ..Default::default()
++        }),
++    );
++    tokio::time::timeout(Duration::from_secs(1), draws.recv()).await??;
++    let roster = app.agent_navigation.roster(Some(main), Some(main));
++    assert_eq!(roster.rows.len(), 3);
++    assert_eq!(roster.rows[2].label, "Saved worker");
++    assert_eq!(
++        roster.rows[2].status,
++        crate::agent_roster::AgentRosterStatus::Closed
++    );
++    Ok(())
++}
++
++#[tokio::test]
++async fn existing_primary_attach_restores_main_liveness_from_turns() -> Result<()> {
++    let mut app = make_test_app().await;
++    let app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
++    let main = ThreadId::new();
++    let child = ThreadId::new();
++    app.agent_navigation.upsert(child, None, None, false);
++    app.agent_navigation.record_parent(child, main);
++    for status in [TurnStatus::InProgress, TurnStatus::Completed] {
++        app.attach_existing_primary_thread_session(
++            &app_server,
++            test_thread_session(main, app.config.cwd.to_path_buf()),
++            vec![test_turn("resumed-turn", status.clone(), Vec::new())],
++        )
++        .await?;
++        let expected = if status == TurnStatus::InProgress {
++            crate::agent_roster::AgentRosterStatus::Running
++        } else {
++            crate::agent_roster::AgentRosterStatus::Idle
++        };
++        for displayed in [main, child] {
++            let roster = app.agent_navigation.roster(Some(main), Some(displayed));
++            assert_eq!(roster.rows[0].status, expected);
++        }
++    }
++    app.attach_existing_primary_thread_session(
++        &app_server,
++        test_thread_session(main, app.config.cwd.to_path_buf()),
++        Vec::new(),
++    )
++    .await?;
++    assert_eq!(
++        app.agent_navigation.roster(Some(main), Some(main)).rows[0].status,
++        crate::agent_roster::AgentRosterStatus::Idle
++    );
++    Ok(())
++}
+diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
+index b824a9f52..c61d50a81 100644
+--- a/codex-rs/tui/src/app/thread_routing.rs
++++ b/codex-rs/tui/src/app/thread_routing.rs
+@@ -1012,13 +1012,18 @@ impl App {
+             .collect();
+ 
+         let mut pending_thread_ids = HashSet::new();
++        let mut pending_interactions = HashSet::new();
+         for (thread_id, store) in channels {
++            let store = store.lock().await;
++            if store.side_parent_pending_status().is_some() {
++                pending_interactions.insert(thread_id);
++            }
+             if Some(thread_id) == self.active_thread_id || Some(thread_id) == side_parent_thread_id
+             {
+                 continue;
+             }
+ 
+-            if store.lock().await.has_pending_thread_approvals() {
++            if store.has_pending_thread_approvals() {
+                 pending_thread_ids.insert(thread_id);
+                 // Approval requests can arrive before the thread's metadata.
+                 if self.agent_navigation.get(&thread_id).is_none() {
+@@ -1030,6 +1035,19 @@ impl App {
+             }
+         }
+ 
++        if self.agent_navigation.pending_interactions != pending_interactions {
++            let previous_roster = self
++                .agent_navigation
++                .roster(self.primary_thread_id, self.current_displayed_thread_id());
++            self.agent_navigation.pending_interactions = pending_interactions;
++            if previous_roster
++                != self
++                    .agent_navigation
++                    .roster(self.primary_thread_id, self.current_displayed_thread_id())
++            {
++                self.chat_widget.request_redraw();
++            }
++        }
+         if self.agent_navigation.pending_approvals != pending_thread_ids {
+             self.agent_navigation.pending_approvals = pending_thread_ids;
+             self.refresh_agent_picker();
+@@ -1069,6 +1087,21 @@ impl App {
+                 .note_turn_finished(&notification.turn.status, now);
+             self.schedule_recap_check(thread_id, now);
+         }
++        let previous_roster = matches!(
++            &notification,
++            ServerNotification::ThreadStarted(_)
++                | ServerNotification::ThreadStatusChanged(_)
++                | ServerNotification::ThreadNameUpdated(_)
++                | ServerNotification::TurnStarted(_)
++                | ServerNotification::TurnCompleted(_)
++                | ServerNotification::ThreadClosed(_)
++                | ServerNotification::ItemStarted(_)
++                | ServerNotification::ItemCompleted(_)
++        )
++        .then(|| {
++            self.agent_navigation
++                .roster(self.primary_thread_id, self.current_displayed_thread_id())
++        });
+         let misalignment_policy_violation =
+             match &notification {
+                 ServerNotification::Error(notification) if !notification.will_retry => {
+@@ -1131,6 +1164,17 @@ impl App {
+                 });
+             }
+         }
++        self.cache_collab_receiver_threads_for_notification(&notification);
++        if let ServerNotification::ThreadStarted(started) = &notification {
++            self.agent_navigation
++                .record_thread_metadata(&started.thread);
++        } else if let ServerNotification::ThreadStatusChanged(updated) = &notification {
++            self.agent_navigation
++                .record_thread_status(thread_id, &updated.status);
++        } else if let ServerNotification::ThreadNameUpdated(updated) = &notification {
++            self.agent_navigation
++                .record_title(thread_id, updated.thread_name.as_deref());
++        }
+         let inferred_session = if let ServerNotification::ThreadStarted(started) = &notification
+             && self.primary_session_configured.is_some()
+         {
+@@ -1264,6 +1308,14 @@ impl App {
+             self.clear_side_parent_action_status(thread_id);
+         }
+         self.refresh_pending_thread_approvals().await;
++        if previous_roster.is_some_and(|previous| {
++            previous
++                != self
++                    .agent_navigation
++                    .roster(self.primary_thread_id, self.current_displayed_thread_id())
++        }) {
++            self.chat_widget.request_redraw();
++        }
+         Ok(())
+     }
+ 
+@@ -1281,6 +1333,11 @@ impl App {
+             sub_agent_activity_item(notification).and_then(sub_agent_activity_display)
+         {
+             let thread_id = activity.thread_id;
++            if let super::app_server_event_targets::ServerNotificationThreadTarget::Thread(parent) =
++                super::app_server_event_targets::server_notification_thread_target(notification)
++            {
++                self.agent_navigation.record_parent(thread_id, parent);
++            }
+             self.agent_navigation.record_sub_agent_activity(activity);
+             self.sync_agent_picker_thread(thread_id);
+             return;
+@@ -1303,6 +1360,25 @@ impl App {
+                 continue;
+             };
+ 
++            let payload = match notification {
++                ServerNotification::ItemStarted(item) => Some(&item.item.payload),
++                ServerNotification::ItemCompleted(item) => Some(&item.item.payload),
++                _ => None,
++            };
++            if let Some(ThreadItemPayload::CollabAgentToolCall {
++                tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
++                sender_thread_id,
++                prompt,
++                ..
++            }) = payload
++            {
++                if let Ok(parent) = ThreadId::from_string(sender_thread_id) {
++                    self.agent_navigation.record_parent(thread_id, parent);
++                }
++                self.agent_navigation
++                    .record_spawn_prompt(thread_id, prompt.as_deref());
++            }
++
+             if self.agent_navigation.get(&thread_id).is_some() {
+                 continue;
+             }
+@@ -1497,9 +1573,15 @@ impl App {
+         );
+         self.sync_agent_picker_thread(thread_id);
+         let channel = self.ensure_thread_channel(thread_id);
+-        {
++        let session_is_running = {
+             let mut store = channel.store.lock().await;
+             store.set_session(session.clone(), turns.clone());
++            store.active_turn_id().is_some()
++        };
++        if session_is_running {
++            self.agent_navigation.mark_running(thread_id);
++        } else {
++            self.agent_navigation.mark_stopped(thread_id);
+         }
+         self.activate_thread_channel(thread_id).await;
+         self.chat_widget
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs b/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs
+index 85ba7e945..685ba6b75 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer/footer_state.rs
+@@ -72,6 +72,7 @@ pub(crate) enum CommandPopupPlacement {
+ pub(crate) struct ComposerRenderOptions<'a> {
+     /// Fullscreen limits the composer independently of activity and modal views.
+     pub(crate) max_height: Option<u16>,
++    pub(crate) agent_roster: Option<&'a crate::agent_roster::AgentRoster>,
+     pub(crate) image_previews: Option<&'a crate::transcript_image::composer::ComposerImages>,
+     pub(crate) rendered_selection:
+         Option<&'a std::cell::RefCell<crate::rendered_selection::RenderedSelection>>,
+diff --git a/codex-rs/tui/src/bottom_pane/mod.rs b/codex-rs/tui/src/bottom_pane/mod.rs
+index aef7c535b..4955f2339 100644
+--- a/codex-rs/tui/src/bottom_pane/mod.rs
++++ b/codex-rs/tui/src/bottom_pane/mod.rs
+@@ -2577,6 +2577,9 @@ impl BottomPane {
+                 }))
+             };
+             flex2.push(/*flex*/ 0, composer);
++            if let Some(roster) = options.agent_roster {
++                flex2.push(/*flex*/ 1, RenderableItem::Borrowed(roster));
++            }
+             RenderableItem::Owned(Box::new(flex2))
+         }
+     }
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index d2962e800..4be825b04 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -1451,7 +1451,7 @@ impl ChatWidget {
+         self.bottom_pane.show_shutdown_in_progress();
+     }
+ 
+-    fn request_redraw(&mut self) {
++    pub(crate) fn request_redraw(&mut self) {
+         self.frame_requester.schedule_frame();
+     }
+ 
+diff --git a/codex-rs/tui/src/chatwidget/rendering.rs b/codex-rs/tui/src/chatwidget/rendering.rs
+index 8ab45414e..7b054a0db 100644
+--- a/codex-rs/tui/src/chatwidget/rendering.rs
++++ b/codex-rs/tui/src/chatwidget/rendering.rs
+@@ -137,7 +137,14 @@ impl ChatWidget {
+     }
+ 
+     pub(crate) fn as_renderable(&self) -> RenderableItem<'_> {
+-        let backdrop = self.as_backdrop_renderable();
++        self.as_renderable_with_roster(None)
++    }
++
++    pub(crate) fn as_renderable_with_roster<'a>(
++        &'a self,
++        roster: Option<&'a crate::agent_roster::AgentRoster>,
++    ) -> RenderableItem<'a> {
++        let backdrop = self.as_backdrop_renderable(roster);
+         match self.centered_dialog() {
+             Some(dialog) => RenderableItem::Owned(Box::new(crate::bottom_pane::DialogOverlay {
+                 backdrop,
+@@ -151,7 +158,10 @@ impl ChatWidget {
+         self.bottom_pane.centered_dialog()
+     }
+ 
+-    fn as_backdrop_renderable(&self) -> RenderableItem<'_> {
++    fn as_backdrop_renderable<'a>(
++        &'a self,
++        roster: Option<&'a crate::agent_roster::AgentRoster>,
++    ) -> RenderableItem<'a> {
+         if self
+             .bottom_pane
+             .selected_index_for_active_view(crate::app::AGENTS_OVERVIEW_VIEW_ID)
+@@ -224,10 +234,13 @@ impl ChatWidget {
+         }
+         flex.push(
+             /*flex*/ 0,
+-            self.bottom_pane_renderable(crate::bottom_pane::ComposerRenderOptions::default())
+-                .inset(Insets::tlbr(
+-                    /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
+-                )),
++            self.bottom_pane_renderable(crate::bottom_pane::ComposerRenderOptions {
++                agent_roster: roster,
++                ..Default::default()
++            })
++            .inset(Insets::tlbr(
++                /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
++            )),
+         );
+         RenderableItem::Owned(Box::new(flex))
+     }
+diff --git a/codex-rs/tui/src/chatwidget/rendering_tests.rs b/codex-rs/tui/src/chatwidget/rendering_tests.rs
+index 28108e895..71ac0afa4 100644
+--- a/codex-rs/tui/src/chatwidget/rendering_tests.rs
++++ b/codex-rs/tui/src/chatwidget/rendering_tests.rs
+@@ -644,3 +644,50 @@ async fn provider_error_preserves_draft_and_survives_thread_navigation() {
+     }
+     insta::assert_snapshot!("provider_errors", snapshots.join("\n\n"));
+ }
++
++#[tokio::test]
++async fn agent_roster_preserves_composer_cursor_and_shrinks_on_short_panes() {
++    use crate::agent_roster::AgentRoster;
++    use crate::agent_roster::AgentRosterRow;
++    use crate::agent_roster::AgentRosterStatus;
++    use crate::bottom_pane::ComposerRenderOptions;
++
++    let (mut widget, _sender, _events, _operations) = make_chatwidget_manual_with_sender().await;
++    widget.handle_paste("draft stays here".into());
++    let roster = AgentRoster::new(vec![
++        AgentRosterRow {
++            label: "Main".into(),
++            selected: true,
++            status: AgentRosterStatus::Running,
++        },
++        AgentRosterRow {
++            label: "Inspect rendering".into(),
++            selected: false,
++            status: AgentRosterStatus::Idle,
++        },
++    ]);
++    let plain = widget.bottom_pane_renderable(ComposerRenderOptions::default());
++    let bottom = widget.bottom_pane_renderable(ComposerRenderOptions {
++        agent_roster: Some(&roster),
++        ..Default::default()
++    });
++    let height = plain.desired_height(60);
++    assert_eq!(bottom.desired_height(60), height + 2);
++    let plain_area = Rect::new(0, 0, 60, height);
++    let full_area = Rect::new(0, 0, 60, height + 2);
++    assert_eq!(plain.cursor_pos(plain_area), bottom.cursor_pos(full_area));
++    let mut buffer = Buffer::empty(full_area);
++    bottom.render(full_area, &mut buffer);
++    assert!(contains_text(&buffer, "draft stays here"));
++    assert!(contains_text(&buffer, "Inspect rendering"));
++    let mut short = Buffer::empty(plain_area);
++    bottom.render(plain_area, &mut short);
++    assert!(contains_text(&short, "draft stays here"));
++    assert_eq!(plain.cursor_pos(plain_area), bottom.cursor_pos(plain_area));
++    let inline = widget.as_renderable_with_roster(Some(&roster));
++    let inline_area = Rect::new(0, 0, 60, inline.desired_height(60));
++    let mut inline_buffer = Buffer::empty(inline_area);
++    inline.render(inline_area, &mut inline_buffer);
++    assert!(contains_text(&inline_buffer, "Inspect rendering"));
++    assert!(inline.cursor_pos(inline_area).is_some());
++}
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index e1bf6223e..49d635cab 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -177,6 +177,7 @@ pub(crate) mod live_wrap;
+ mod local_settings;
+ mod rendered_selection;
+ pub use live_wrap::RowBuilder;
++mod agent_roster;
+ mod local_chatgpt_auth;
+ mod managed_new_thread_defaults;
+ mod markdown;
